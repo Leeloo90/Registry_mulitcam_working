@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { MediaTable } from './components/MediaTable';
-import { LogViewer } from './components/LogViewer';
 import { useRegistry } from './services/useRegistry';
 import { useGoogleDrive } from './services/useGoogleDrive';
 import { useForensicSurveyor } from './services/useForensicSurveyor';
 import { useXMLExporter } from './services/useXMLExporter';
 import { useHybridSync } from './services/useHybridSync';
-import { useLogger } from './services/useLogger';
 import { MediaFile, IndexingStatus, IndexingProgress } from './types';
 
 const CLOUD_EXTRACTOR_URL = 'https://metadata-extractor-286149224994.europe-west1.run.app';
@@ -41,13 +39,18 @@ const GlobalStyles = () => (
 );
 
 const App: React.FC = () => {
-  const { user, login, openPicker, fetchFilesRecursively, isReady } = useGoogleDrive();
+  const { user, login, logout, openPicker, fetchFilesRecursively, isReady } = useGoogleDrive();
   const { loading: dbLoading, upsertMedia, getAllMedia, clearRegistry } = useRegistry();
 
   const { analyzeFile, getAnalysisResult, isAnalyzing } = useForensicSurveyor(user?.accessToken || null);
   const { generateXML, downloadXML } = useXMLExporter();
   const { performMulticamSync, isSyncing } = useHybridSync();
-  const { logs, clearLogs, info, success, warning, error } = useLogger();
+
+  // Stub logging functions (logging removed)
+  const info = (...args: any[]) => {};
+  const success = (...args: any[]) => {};
+  const warning = (...args: any[]) => {};
+  const error = (...args: any[]) => {};
 
   const [registryFiles, setRegistryFiles] = useState<MediaFile[]>([]);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
@@ -174,10 +177,11 @@ const App: React.FC = () => {
   const handleCategorization = async () => {
     const unknowns = registryFiles.filter(f => f.clip_type === 'unknown');
     info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, 'PHASE 1');
-    info(`📋 PHASE 1: Gemini 2.0 Flash AI Categorization`, 'PHASE 1');
+    info(`📋 PHASE 1: Snippet-Based Categorization (Optimized)`, 'PHASE 1');
     info(`Target: ${unknowns.length} files with clip_type='unknown'`, 'PHASE 1');
+    info(`Strategy: 15-second middle snippet analysis (30s fallback)`, 'PHASE 1');
+    info(`Service: https://categorization-triage-286149224994.us-central1.run.app`, 'PHASE 1');
     info(`Model: gemini-2.0-flash-001`, 'PHASE 1');
-    info(`Endpoint: Vertex AI (europe-west1)`, 'PHASE 1');
     setActivePhase('Categorization');
 
     for (let i = 0; i < unknowns.length; i++) {
@@ -185,25 +189,62 @@ const App: React.FC = () => {
       setAnalyzingId(file.drive_id);
       info(`\n[${i + 1}/${unknowns.length}] Analyzing: ${file.filename}`, 'PHASE 1');
       info(`   Category: ${file.media_category}`, 'PHASE 1');
+      info(`   Duration: ${((file.tech_metadata?.duration_ms || 0) / 1000).toFixed(1)}s`, 'PHASE 1');
 
-      info(`🔄 Step 1: Ensuring file is in GCS`, 'PHASE 1');
-      info(`   gs://story-graph-proxies/${file.filename}`, 'PHASE 1');
-      info(`🔄 Step 2: Calling Gemini 2.0 Flash via Vertex AI`, 'PHASE 1');
-      info(`   API: POST https://europe-west1-aiplatform.googleapis.com/v1/...`, 'PHASE 1');
+      info(`🔄 Step 0: Ensuring full file is in GCS bucket`, 'PHASE 1');
+      info(`   Checking: gs://story-graph-proxies/${file.filename}`, 'PHASE 1');
+      info(`   If not found → Mirror from Google Drive`, 'PHASE 1');
+
+      info(`🔄 Step 1: Calling Snippet Triage Service`, 'PHASE 1');
+      info(`   POST https://categorization-triage-286149224994.us-central1.run.app`, 'PHASE 1');
+      info(`   Payload:`, 'PHASE 1');
+      info(`     {`, 'PHASE 1');
+      info(`       filename: "${file.filename}",`, 'PHASE 1');
+      info(`       duration_ms: ${file.tech_metadata?.duration_ms || 0},`, 'PHASE 1');
+      info(`       duration_limit: 15  // Initial 15s window`, 'PHASE 1');
+      info(`     }`, 'PHASE 1');
+
+      info(`🔄 Step 2: Cloud Run extracts middle 15s snippet`, 'PHASE 1');
+      const middlePoint = ((file.tech_metadata?.duration_ms || 0) / 1000) / 2;
+      const snippetStart = Math.max(0, middlePoint - 7.5);
+      info(`   Start point: ${snippetStart.toFixed(1)}s (geometric middle - 7.5s)`, 'PHASE 1');
+      info(`   FFmpeg: -ss ${snippetStart.toFixed(1)} -t 15 -c copy`, 'PHASE 1');
+      info(`   Output: /tmp/snippet_${file.filename}`, 'PHASE 1');
+
+      info(`🔄 Step 3: Upload snippet to GCS`, 'PHASE 1');
+      info(`   Destination: gs://story-graph-proxies/triage_snippets/${file.filename}`, 'PHASE 1');
+
+      info(`🔄 Step 4: Gemini 2.0 Flash multimodal analysis`, 'PHASE 1');
+      info(`   Model: GenerativeModel("gemini-2.0-flash-001")`, 'PHASE 1');
+      info(`   Input Type: Video Part (snippet from GCS)`, 'PHASE 1');
       info(`📝 PROMPT SENT TO GEMINI:`, 'PHASE 1');
-      info(`   Role: user`, 'PHASE 1');
-      info(`   Parts:`, 'PHASE 1');
-      info(`     [1] File Data: { mimeType: "${file.media_category === 'audio' ? 'audio/wav' : file.mime_type}", fileUri: "gs://story-graph-proxies/${file.filename}" }`, 'PHASE 1');
-      info(`     [2] Text Prompt: "Analyze the audio and visuals of this clip. Is this an 'interview' or 'b-roll'? Respond ONLY with one of those two words."`, 'PHASE 1');
+      info(`   [Part 1] Video: gs://story-graph-proxies/triage_snippets/${file.filename}`, 'PHASE 1');
+      info(`   [Part 2] Prompt Text:`, 'PHASE 1');
+      info(`      "Analyze this 15-second visual clip.`, 'PHASE 1');
+      info(`       Categorize it as either 'interview' (talking head,`, 'PHASE 1');
+      info(`       dialogue-focused) or 'b-roll' (visual context, action,`, 'PHASE 1');
+      info(`       landscape). Respond ONLY with a JSON object:`, 'PHASE 1');
+      info(`       {\\"category\\": \\"interview\\" | \\"b-roll\\", \\"confidence\\": 0.0-1.0}"`, 'PHASE 1');
+
+      info(`⏳ Waiting for Cloud Run response...`, 'PHASE 1');
 
       try {
         const data = await analyzeFile(file, 'shot_type');
 
-        success(`✓ Gemini Response Received`, 'PHASE 1');
-        info(`📊 CLASSIFICATION RESULT:`, 'PHASE 1');
-        info(`   Input: ${file.filename}`, 'PHASE 1');
-        info(`   Output: clip_type = "${data.clip_type}"`, 'PHASE 1');
-        info(`   Reasoning: ${data.analysis_content || 'N/A'}`, 'PHASE 1');
+        success(`✓ Cloud Run Service Response Received`, 'PHASE 1');
+        info(`📊 GEMINI CLASSIFICATION RESULT:`, 'PHASE 1');
+        info(`   Snippet analyzed: ${file.filename}`, 'PHASE 1');
+        info(`   Category: "${data.clip_type}"`, 'PHASE 1');
+        info(`   Details: ${data.analysis_content || 'N/A'}`, 'PHASE 1');
+
+        if (data.analysis_content?.includes('30s')) {
+          warning(`   ⚠ FALLBACK TRIGGERED: Initial 15s confidence < 80%`, 'PHASE 1');
+          warning(`   ⚠ Retried with 30s snippet for better accuracy`, 'PHASE 1');
+        }
+
+        info(`🔄 Step 5: Cleanup operations`, 'PHASE 1');
+        info(`   Cloud Run removes /tmp files`, 'PHASE 1');
+        info(`   Snippet remains in GCS: triage_snippets/${file.filename}`, 'PHASE 1');
 
         info(`💾 Updating database record`, 'PHASE 1');
         await upsertMedia({ ...file, ...data });
@@ -431,6 +472,7 @@ const App: React.FC = () => {
               {user ? (
                 <>
                   <button onClick={handleReset} className="px-4 py-2 text-red-600 font-bold hover:bg-red-50 rounded-lg text-sm">Reset</button>
+                  <button onClick={logout} className="px-4 py-2 text-slate-600 font-bold hover:bg-slate-50 rounded-lg text-sm border border-slate-200">Logout</button>
                   <button onClick={() => openPicker(handleFolderSelected)} className="bg-white border border-slate-200 text-slate-700 px-8 py-3 rounded-xl font-bold shadow-sm transition-all">Index Folder</button>
                 </>
               ) : (
@@ -458,9 +500,6 @@ const App: React.FC = () => {
         </header>
 
         <main className="space-y-12">
-          {/* Live Log Viewer */}
-          <LogViewer logs={logs} onClear={clearLogs} />
-
           <MediaTable
             files={registryFiles}
             onCheckStatus={handleCheckStatus}

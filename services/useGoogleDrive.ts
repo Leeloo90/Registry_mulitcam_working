@@ -20,11 +20,35 @@ const SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform' // REQUIRED for Gemini/Vertex
 ].join(' ');
 
+const TOKEN_STORAGE_KEY = 'google_drive_token';
+const TOKEN_EXPIRY_KEY = 'google_drive_token_expiry';
+
 export const useGoogleDrive = () => {
   const [user, setUser] = useState<GoogleUser | null>(null);
   const [isGapiLoaded, setIsGapiLoaded] = useState(false);
   const [isGsiLoaded, setIsGsiLoaded] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
+
+  // Restore saved token on mount
+  useEffect(() => {
+    const savedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+    const savedExpiry = localStorage.getItem(TOKEN_EXPIRY_KEY);
+
+    if (savedToken && savedExpiry) {
+      const expiryTime = parseInt(savedExpiry);
+      const now = Date.now();
+
+      // Check if token is still valid (hasn't expired)
+      if (now < expiryTime) {
+        console.log('[Auth] Restored saved token from localStorage');
+        setUser({ accessToken: savedToken });
+      } else {
+        console.log('[Auth] Saved token expired, clearing storage');
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        localStorage.removeItem(TOKEN_EXPIRY_KEY);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     const handleGapiLoad = () => {
@@ -78,15 +102,26 @@ export const useGoogleDrive = () => {
   /**
    * Updated Login:
    * Uses the joined SCOPES string including Vertex AI permissions.
+   * Saves token to localStorage for persistence across sessions.
    */
   const login = useCallback(() => {
     if (!isGsiLoaded) return;
     const tokenClient = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CONFIG.CLIENT_ID,
-      scope: SCOPES, 
+      scope: SCOPES,
       callback: (response: any) => {
         if (response.access_token) {
           console.log("[Auth] Token received with Cloud & Drive privileges.");
+
+          // Save token to localStorage
+          localStorage.setItem(TOKEN_STORAGE_KEY, response.access_token);
+
+          // Google OAuth tokens typically expire in 1 hour (3600 seconds)
+          // We'll set expiry to 55 minutes to be safe
+          const expiryTime = Date.now() + (55 * 60 * 1000);
+          localStorage.setItem(TOKEN_EXPIRY_KEY, expiryTime.toString());
+
+          console.log('[Auth] Token saved to localStorage');
           setUser({ accessToken: response.access_token });
         }
       },
@@ -114,8 +149,15 @@ export const useGoogleDrive = () => {
     picker.setVisible(true);
   }, [user, isGapiLoaded]);
 
+  const logout = useCallback(() => {
+    console.log('[Auth] Logging out and clearing saved token');
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(TOKEN_EXPIRY_KEY);
+    setUser(null);
+  }, []);
+
   const fetchFilesRecursively = useCallback(async (
-    folderId: string, 
+    folderId: string,
     onFileFound: (file: any) => void,
     onProgress: (count: number) => void
   ) => {
@@ -141,13 +183,13 @@ export const useGoogleDrive = () => {
               queue.push(file.id);
             } else if (file.mimeType.startsWith('video/') || file.mimeType.startsWith('audio/')) {
               // Extract duration for temporal sampling in Gemini
-              const duration = file.videoMediaMetadata?.durationMillis 
-                ? parseInt(file.videoMediaMetadata.durationMillis) / 1000 
+              const duration = file.videoMediaMetadata?.durationMillis
+                ? parseInt(file.videoMediaMetadata.durationMillis) / 1000
                 : 0;
 
               onFileFound({
                 ...file,
-                duration 
+                duration
               });
               processedCount++;
               onProgress(processedCount);
@@ -161,12 +203,13 @@ export const useGoogleDrive = () => {
     }
   }, [user]);
 
-  return { 
-    user, 
-    login, 
-    openPicker, 
-    fetchFilesRecursively, 
+  return {
+    user,
+    login,
+    logout,
+    openPicker,
+    fetchFilesRecursively,
     isReady: isGapiLoaded && isGsiLoaded,
-    initError 
+    initError
   };
 };

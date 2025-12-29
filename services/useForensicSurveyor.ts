@@ -4,13 +4,14 @@ import { MediaFile } from '../types';
 export const useForensicSurveyor = (accessToken: string | null) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   
-  // CONFIGURATION: Must match your GCP Environment
+  // CONFIGURATION
   const BUCKET_NAME = "story-graph-proxies";
   const PROJECT_ID = "media-sync-registry";
   const LOCATION = "europe-west1"; 
   
-  // Cloud Run Metadata Extractor Service URL
+  // Cloud Run Service URLs
   const METADATA_SERVICE_URL = "https://metadata-extractor-286149224994.europe-west1.run.app";
+  const TRIAGE_SERVICE_URL = "https://categorization-triage-286149224994.us-central1.run.app";
 
   /**
    * Helper: Formats transcription results from Video Intelligence API
@@ -28,12 +29,9 @@ export const useForensicSurveyor = (accessToken: string | null) => {
 
   /**
    * Mirroring Stage: Drive -> GCS
-   * Required for the Cloud Run Extractor and Gemini to access raw file bytes.
    */
   const syncToGCS = async (file: MediaFile) => {
     const encodedName = encodeURIComponent(file.filename);
-    
-    // Check existence to avoid redundant uploads
     const checkRes = await fetch(
       `https://storage.googleapis.com/storage/v1/b/${BUCKET_NAME}/o/${encodedName}`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -57,12 +55,11 @@ export const useForensicSurveyor = (accessToken: string | null) => {
       }
     );
 
-    if (!uploadRes.ok) throw new Error("Mirroring to GCS failed. Check Bucket CORS settings.");
+    if (!uploadRes.ok) throw new Error("Mirroring to GCS failed.");
   };
 
   /**
    * PHASE 0: TECH PASS
-   * Calls the Cloud Run MediaInfo wrapper for SMPTE timecode and frame-accurate metadata.
    */
   const runTechPass = async (file: MediaFile) => {
     try {
@@ -73,12 +70,7 @@ export const useForensicSurveyor = (accessToken: string | null) => {
       });
 
       if (!response.ok) throw new Error("Metadata Service Failed");
-
       const metadata = await response.json();
-
-      console.log('[Surveyor] Tech Metadata Ingested:', metadata);
-
-      // Cloud service returns data wrapped in tech_metadata object
       const techData = metadata.tech_metadata || metadata;
 
       return {
@@ -89,7 +81,6 @@ export const useForensicSurveyor = (accessToken: string | null) => {
           height: techData.height || 0,
           frame_rate_fraction: techData.frame_rate_fraction || '25.000',
           total_frames: techData.total_frames || '0',
-          // Optional audio specs if returned by function
           sample_rate: techData.sample_rate,
           channels: techData.channels,
           bit_depth: techData.bit_depth,
@@ -100,52 +91,57 @@ export const useForensicSurveyor = (accessToken: string | null) => {
         last_forensic_stage: 'tech' as const
       };
     } catch (err: any) {
-      console.error("[Surveyor] Tech Pass Error:", err);
       return { analysis_content: `Tech Spec Error: ${err.message}`, operation_id: 'error' };
     }
   };
 
   /**
-   * PHASE 1: DISCOVERY
-   * Uses Gemini 2.0 Flash to triage clips (Interview vs B-Roll).
+   * PHASE 1: SNIPPET-BASED TRIAGE
+   * Replaces runGeminiDiscovery. Uses the middle-fragment optimization.
    */
-  const runGeminiDiscovery = async (file: MediaFile, gcsUri: string) => {
-    const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/gemini-2.0-flash-001:generateContent`;
-    
-    // Normalize mimetype for Gemini (especially for Drive .wav files)
-    const mimeType = file.media_category === 'audio' ? "audio/wav" : file.mime_type;
+  const runSnippetTriage = async (file: MediaFile, retryWithLongerSnippet = false) => {
+    try {
+      // Use 15s for initial triage, 30s if confidence was low previously
+      const windowSize = retryWithLongerSnippet ? 30 : 15;
+      
+      console.log(`[Surveyor] Snippet Triage (${windowSize}s): ${file.filename}`);
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ 
-          role: "user", 
-          parts: [
-            { fileData: { mimeType: mimeType, fileUri: gcsUri } }, 
-            { text: `Analyze the audio and visuals of this clip. Is this an 'interview' or 'b-roll'? Respond ONLY with one of those two words.` }
-          ] 
-        }]
-      })
-    });
-    
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || "Gemini Discovery Failed");
-    
-    const rawResult = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() || "";
-    const isInterview = rawResult.includes('interview');
-    
-    return {
-      clip_type: (isInterview ? 'interview' : 'b-roll') as 'interview' | 'b-roll',
-      analysis_content: `Gemini Triage: ${isInterview ? 'Interview (Spine Candidate)' : 'B-Roll (Satellite Candidate)'}`,
-      operation_id: 'light_complete',
-      last_forensic_stage: 'light' as const
-    };
+      const response = await fetch(TRIAGE_SERVICE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.filename,
+          duration_ms: file.tech_metadata?.duration_ms || 0,
+          duration_limit: windowSize
+        })
+      });
+
+      if (!response.ok) throw new Error("Triage Service Failed");
+
+      const triage = await response.json();
+
+      // Fallback logic: If confidence is low, run one more pass with a longer snippet
+      if (triage.confidence < 0.8 && !retryWithLongerSnippet) {
+        console.warn(`[Surveyor] Low confidence (${triage.confidence}), retrying with 30s snippet...`);
+        return await runSnippetTriage(file, true);
+      }
+
+      const isInterview = triage.category === 'interview';
+
+      return {
+        clip_type: (isInterview ? 'interview' : 'b-roll') as 'interview' | 'b-roll',
+        analysis_content: `Snippet Triage (${windowSize}s): ${isInterview ? 'Interview' : 'B-Roll'} (Conf: ${Math.round(triage.confidence * 100)}%)`,
+        operation_id: 'light_complete',
+        last_forensic_stage: 'light' as const
+      };
+    } catch (err: any) {
+      console.error("[Surveyor] Triage Error:", err);
+      return { analysis_content: `Triage Error: ${err.message}`, operation_id: 'error' };
+    }
   };
 
   /**
    * PHASE 2: HEAVY PASS
-   * Triggers Video Intelligence API for long-running transcription or label detection.
    */
   const runHeavyPass = async (file: MediaFile, gcsUri: string, mode: 'b_roll_desc' | 'transcribe') => {
     const features = mode === 'transcribe' ? ['SPEECH_TRANSCRIPTION'] : ['LABEL_DETECTION', 'SHOT_CHANGE_DETECTION'];
@@ -163,7 +159,7 @@ export const useForensicSurveyor = (accessToken: string | null) => {
     if (!res.ok) throw new Error(data.error?.message || 'Cloud Analysis Error');
     
     return {
-        operation_id: data.name, // Operation name for polling
+        operation_id: data.name,
         analysis_content: mode === 'transcribe' ? "Transcription in progress..." : "Deep visual analysis in progress...",
         last_forensic_stage: 'heavy' as const
     };
@@ -173,7 +169,7 @@ export const useForensicSurveyor = (accessToken: string | null) => {
    * Main Entry Point
    */
   const analyzeFile = useCallback(async (file: MediaFile, phase?: string): Promise<Partial<MediaFile>> => {
-    if (!accessToken) throw new Error("Unauthorized: Access token missing.");
+    if (!accessToken) throw new Error("Unauthorized");
     setIsAnalyzing(true);
     
     try {
@@ -184,13 +180,13 @@ export const useForensicSurveyor = (accessToken: string | null) => {
         case 'tech_specs':
           return await runTechPass(file);
         case 'shot_type':
-          return await runGeminiDiscovery(file, rawUri);
+          return await runSnippetTriage(file); // Switched to optimized triage
         case 'b_roll_desc':
           return await runHeavyPass(file, rawUri, 'b_roll_desc');
         case 'transcribe':
           return await runHeavyPass(file, rawUri, 'transcribe');
         default:
-          return await runGeminiDiscovery(file, rawUri);
+          return await runSnippetTriage(file);
       }
     } catch (err: any) {
       console.error("[Surveyor] Pipeline Error:", err);
@@ -201,7 +197,7 @@ export const useForensicSurveyor = (accessToken: string | null) => {
   }, [accessToken]);
 
   /**
-   * Polling Logic for long-running Video Intelligence tasks
+   * Polling Logic
    */
   const getAnalysisResult = useCallback(async (operationId: string) => {
     if (!accessToken || ['light_complete', 'error', 'completed'].includes(operationId)) return null;
@@ -210,7 +206,6 @@ export const useForensicSurveyor = (accessToken: string | null) => {
       headers: { Authorization: `Bearer ${accessToken}` } 
     });
     const data = await res.json();
-    
     if (!data.done) return { done: false };
 
     const results = data.response.annotationResults;
