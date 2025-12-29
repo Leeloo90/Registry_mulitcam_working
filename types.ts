@@ -1,24 +1,57 @@
+/**
+ * CORE TYPES: STORY GRAPH DATABASE SCHEMA
+ * Version: 4.0 (Production Hybrid Sync)
+ */
+
 export interface TechnicalMetadata {
   // SMPTE truth for professional NLE conform (Resolve/Premiere)
-  start_tc: string;              // e.g., "05:10:24:00" from MediaInfo/Zoom
-  
+  start_tc: string;              // e.g., "00:49:50:00" from BWF TimeReference
+
   // Visual Specs
   width: number;                 // 0 for audio files
   height: number;                // 0 for audio files
-  frame_rate_fraction: string;   // "25.000" - stored as string to keep precision for parseFloat
-  total_frames: string;          // stored as string to avoid precision loss on large integers
-  
+  frame_rate_fraction: string;   // "25.000" - stored as string for precision
+  total_frames: string;
+
   // Codec & Container specs
   codec_id: string;              // e.g., "PCM", "AAC", "AVC", "ProRes"
   duration_ms: number;           // Milliseconds for UI progress/math
-  
-  // NEW: Professional Audio specs (Critical for ZOOM F6 / Spine Nodes)
-  sample_rate?: number;          // e.g., 48000 or 44100
-  channels?: number;             // e.g., 2 (stereo) or 6 (polyphonic wav)
-  bit_depth?: number;            // e.g., 24 or 32
-  
+
+  // Professional Audio specs (Critical for ZOOM F6 / Spine Nodes)
+  sample_rate?: number;          // e.g., 48000
+  channels?: number;             // e.g., 6 (polyphonic wav)
+  bit_depth?: number;            // e.g., 32 (float)
+
   // Identification
-  reel_name?: string;            // Map from %Producer% or %Description% if available
+  reel_name?: string;            // PPRO/Resolve metadata matching
+}
+
+/**
+ * NARRATIVE ATOMIC UNITS
+ * Allows Gemini to edit by word/sentence/segment
+ */
+export interface NarrativeWord {
+  word_id: string;
+  text: string;
+  start_tc: string;   // Relates to the SYNCED CONTAINER, not the raw clip
+  end_tc: string;
+  confidence: number;
+}
+
+export interface NarrativeSentence {
+  sentence_id: string;
+  text: string;
+  is_fluff: boolean;  // Gemini flagged (e.g. "um", "like")
+  sentiment_score: number;
+  words: NarrativeWord[];
+}
+
+export interface NarrativeSegment {
+  segment_id: string;
+  speaker_label: string;
+  start_tc: string;
+  end_tc: string;
+  sentences: NarrativeSentence[];
 }
 
 export interface MediaFile {
@@ -30,7 +63,6 @@ export interface MediaFile {
   
   // Total frames offset from the global "Anchor Frame" (01:00:00:00)
   sync_offset_frames: number;
-  last_forensic_stage?: 'light' | 'heavy' | 'tech' | 'sync'; // Added 'sync'
   
   // Native Drive duration (ms)
   duration?: number;
@@ -38,24 +70,16 @@ export interface MediaFile {
   // --- Forensic Pipeline Fields ---
   media_category: 'video' | 'audio'; 
   
-  // unknown: Needs triage
-  // interview: Becomes a Spine Node
-  // b-roll: Becomes a Satellite Node
-  clip_type: 'interview' | 'b-roll' | 'unknown';
+  // Category assigned by Gemini Assessment
+  clip_type: 'interview' | 'b-roll' | 'external_audio' | 'location_sound' | 'unknown';
   
-  // operation_id state:
-  // undefined: No forensic started
-  // 'light_complete': Triage finished
-  // [GCP_OP_ID]: Long-running cloud job ID
-  // 'completed': Fully indexed
-  // 'error': Failed
+  // Ingest State Tracking
   operation_id?: string;
+  last_forensic_stage?: 'light' | 'heavy' | 'tech' | 'sync' | 'parsed';
   
-  // Summary/Transcript storage
-  analysis_content?: string; 
-
-  // Tracking the last forensic milestone reached
-  last_forensic_stage?: 'light' | 'heavy' | 'tech';
+  // Transcription & Semantic Layers
+  analysis_content?: string; // Summary or raw transcript text
+  narrative_segments?: NarrativeSegment[]; // [NEW] The Atomic units
 
   // The "Source of Truth" from the Cloud Extractor
   tech_metadata?: TechnicalMetadata;
